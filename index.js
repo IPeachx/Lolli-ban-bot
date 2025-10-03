@@ -177,7 +177,7 @@ function buildUnbanEmbed({ targetTag, motivo, autorizaTag, ticket }) {
 
 function buildExposeEmbed({ targetTag, tiempo, motivo, autorizaTag, link1, link2 }) {
   const embed = pinkEmbedBase()
-    .setTitle('📢 Exposed')
+    .setTitle('🚨 EXPOSED')
     .setDescription(
       [
         `**Usuario:** ${targetTag}`,
@@ -297,7 +297,7 @@ function buildExposeModal() {
         new TextInputBuilder().setCustomId('m_tiempo').setLabel('Tiempo de ban (o N/A)').setStyle(TextInputStyle.Short).setRequired(true)
       ),
       new ActionRowBuilder().addComponents(
-        new TextInputBuilder().setCustomId('m_link1').setLabel('Pruebas (Gif URL)').setStyle(TextInputStyle.Short).setRequired(true)
+        new TextInputBuilder().setCustomId('m_link1').setLabel('Gif (Gif URL)').setStyle(TextInputStyle.Short).setRequired(true)
       ),
       new ActionRowBuilder().addComponents(
         new TextInputBuilder().setCustomId('m_link2').setLabel('Clip (URL del clip en MP4)').setStyle(TextInputStyle.Short).setRequired(false)
