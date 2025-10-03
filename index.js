@@ -1,14 +1,38 @@
+// index.js
 import 'dotenv/config';
 import {
-  Client, GatewayIntentBits, Partials,
-  ActionRowBuilder, ButtonBuilder, ButtonStyle,
-  ModalBuilder, TextInputBuilder, TextInputStyle,
-  EmbedBuilder, Events
+  Client,
+  GatewayIntentBits,
+  Partials,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+  EmbedBuilder,
+  Events
 } from 'discord.js';
 import fs from 'fs';
 import fse from 'fs-extra';
 import path from 'path';
 
+/* ===================== Persistencia (Railway) ===================== */
+const DATA_DIR = process.env.DATA_DIR || '/app/data';
+fse.ensureDirSync(DATA_DIR);
+
+const BANS_PATH    = path.join(DATA_DIR, 'bans.json');
+const EXPOSED_PATH = path.join(DATA_DIR, 'exposed.json');
+
+// crea archivos vacíos si no existen
+for (const p of [BANS_PATH, EXPOSED_PATH]) {
+  if (!fs.existsSync(p)) fs.writeFileSync(p, '[]', 'utf8');
+}
+
+const readJSON  = p => { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return []; } };
+const writeJSON = (p, data) => fs.writeFileSync(p, JSON.stringify(data, null, 2), 'utf8');
+
+/* ========================= Variables ENV ========================= */
 const {
   DISCORD_TOKEN,
   ACTIONS_CHANNEL_ID,
@@ -16,88 +40,168 @@ const {
   LOGS_CHANNEL_ID,
   BAN_UNBAN_ROLE_ID,
   LISTS_ROLE_IDS,
-  APPLY_GUILD_BANS
+  APPLY_GUILD_BANS,
+
+  // Imágenes
+  PANEL_LOGO_URL,
+  PANEL_BANNER_URL,
+  EXPOSE_LOGO_URL,
+  EXPOSE_BANNER_URL
 } = process.env;
 
-const LISTS_ROLES = (LISTS_ROLE_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
+const LISTS_ROLES = (LISTS_ROLE_IDS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
 const APPLY_REAL_BANS = (APPLY_GUILD_BANS || 'false').toLowerCase() === 'true';
 
-// ===== IMÁGENES PARA PANELES / EXPOSE (cdn.discordapp.com) =====
-const PANEL_LOGO_URL   = 'https://media.discordapp.net/attachments/1163056754997874779/1416221323449077840/LOGO-LOLLIPOP-SV.png?ex=68d7daa3&is=68d68923&hm=411f8135d1ef3191301f0446bf9c36ba803a0e405b3b27f4b619ceb008637415&=&format=webp&quality=lossless&width=1541&height=856'; // ej: 'https://cdn.discordapp.com/attachments/<canal>/<id>/logo.png'
-const PANEL_BANNER_URL = 'https://media.discordapp.net/attachments/1358209223183569230/1421261299437801513/Bww7G6R.gif?ex=68d8643b&is=68d712bb&hm=2b0c8e121b3681adb9e1ed73338b5168ccdfc6926e853a0895b882124af8ecc6&='; // ej: 'https://cdn.discordapp.com/attachments/<canal>/<id>/banner.png'
-const EXPOSE_LOGO_URL  = 'https://media.discordapp.net/attachments/1163056754997874779/1416221323449077840/LOGO-LOLLIPOP-SV.png?ex=68d7daa3&is=68d68923&hm=411f8135d1ef3191301f0446bf9c36ba803a0e405b3b27f4b619ceb008637415&=&format=webp&quality=lossless&width=1541&height=856'; // thumbnail + footer
-const EXPOSE_BANNER_URL= 'https://media.discordapp.net/attachments/1379900241314189353/1421265877999026306/RADi7aj.gif?ex=68d8687f&is=68d716ff&hm=033fd956c5155a35975e1217cbc2055d0776ac8e34d1ef3cb2b4a074f12cd53b&='; // imagen por defecto si no hay imagen en Pruebas
-
-// ===== Datos en archivos =====
-const DATA_DIR = path.join(process.cwd(), 'data');
-const BANS_PATH = path.join(DATA_DIR, 'bans.json');
-const EXPOSED_PATH = path.join(DATA_DIR, 'exposed.json');
-
-function ensureDataFiles() {
-  fse.ensureDirSync(DATA_DIR);
-  if (!fs.existsSync(BANS_PATH)) fs.writeFileSync(BANS_PATH, '[]', 'utf8');
-  if (!fs.existsSync(EXPOSED_PATH)) fs.writeFileSync(EXPOSED_PATH, '[]', 'utf8');
-}
-ensureDataFiles();
-
-function loadJson(p) {
-  try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return []; }
-}
-function saveJson(p, data) {
-  fs.writeFileSync(p, JSON.stringify(data, null, 2), 'utf8');
-}
-
-// ===== Utilidades =====
-function pinkEmbedBase() { return new EmbedBuilder().setColor(0xFFC0CB).setTimestamp(Date.now()); }
-function hasRole(member, roleId) { return member?.roles?.cache?.has(roleId); }
-function hasAnyRole(member, roleIds = []) { return roleIds.some(r => member?.roles?.cache?.has(r)); }
-async function resolveUserTag(client, userId) {
-  try {
-    const u = await client.users.fetch(userId);
-    return `${u.username}${u.discriminator && u.discriminator !== '0' ? '#' + u.discriminator : ''}`;
-  } catch { return `Usuario(${userId})`; }
-}
-
-// ===== Helpers CSV para exportar =====
-function csvEscape(val) {
-  const s = (val ?? '').toString();
-  if (/[",\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
-  return s;
-}
-function buildBansCSV(bans) {
-  const header = ['type','userId','motivo','tiempo','ticket','autorizaId','byId','guildId','createdAt','messageId','channelId'].join(',');
-  const rows = bans.map(b => [
-    b.type, b.userId, b.motivo, b.tiempo, b.ticket || '', b.autorizaId || '',
-    b.byId || '', b.guildId || '', new Date(b.createdAt).toISOString(),
-    b.messageId || '', b.channelId || ''
-  ].map(csvEscape).join(','));
-  return [header, ...rows].join('\n');
-}
-function buildExposedCSV(expos) {
-  const header = ['userId','motivo','tiempo','link1','link2','byId','guildId','createdAt'].join(',');
-  const rows = expos.map(e => [
-    e.userId, e.motivo, e.tiempo, e.link1 || '', e.link2 || '',
-    e.byId || '', e.guildId || '', new Date(e.createdAt).toISOString()
-  ].map(csvEscape).join(','));
-  return [header, ...rows].join('\n');
-}
-
-// ===== Cliente =====
+/* ========================= Cliente Discord ======================== */
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.MessageContent,
   ],
-  partials: [Partials.GuildMember, Partials.User]
+  partials: [Partials.Message, Partials.Channel, Partials.GuildMember],
 });
 
-client.once(Events.ClientReady, (c) => {
-  console.log(`✅ Conectado como ${c.user.tag}`);
-});
+/* ======================== Helpers y estilos ======================= */
+const pinkEmbedBase = () =>
+  new EmbedBuilder()
+    .setColor(0xF19EC2) // rosa claro
+    .setTimestamp();
 
-// ====== Panel de botones ======
+const ok = s => `✅ ${s}`;
+const no = s => `❌ ${s}`;
+
+function addPanelBranding(embed) {
+  if (PANEL_LOGO_URL)   embed.setThumbnail(PANEL_LOGO_URL);
+  if (PANEL_BANNER_URL) embed.setImage(PANEL_BANNER_URL);
+  return embed;
+}
+function addExposeBranding(embed, useBanner = true) {
+  if (EXPOSE_LOGO_URL) embed.setThumbnail(EXPOSE_LOGO_URL);
+  if (useBanner && EXPOSE_BANNER_URL) embed.setImage(EXPOSE_BANNER_URL);
+  return embed;
+}
+
+function hasAnyRole(member, roleIdOrList) {
+  if (!member) return false;
+  const ids = Array.isArray(roleIdOrList) ? roleIdOrList : [roleIdOrList];
+  return ids.some(id => member.roles?.cache?.has(id));
+}
+
+async function sendLog(interaction, action, data = {}) {
+  try {
+    const ch = interaction.guild.channels.cache.get(LOGS_CHANNEL_ID);
+    if (!ch) return;
+
+    const embed = pinkEmbedBase()
+      .setTitle(`📒 Log: ${action}`)
+      .setDescription(
+        Object.entries(data).map(([k, v]) => `**${k}:** ${String(v)}`).join('\n') || '_Sin datos_'
+      )
+      .setFooter({ text: `Por: ${interaction.user.tag} (${interaction.user.id})` });
+
+    addPanelBranding(embed);
+    await ch.send({ embeds: [embed] });
+  } catch (e) {
+    console.warn('No se pudo enviar log:', e.message);
+  }
+}
+
+function tagOf(userOrMember) {
+  const u = userOrMember?.user ?? userOrMember;
+  return u ? `<@${u.id}>` : 'N/A';
+}
+
+async function resolveUser(guild, raw) {
+  raw = (raw || '').trim();
+
+  // mención <@id>
+  const mentionId = raw.match(/^<@!?(\d+)>$/)?.[1];
+  if (mentionId) {
+    try { const m = await guild.members.fetch(mentionId); return { member: m, user: m.user }; } catch {}
+  }
+  // solo ID
+  if (/^\d{16,20}$/.test(raw)) {
+    try { const m = await guild.members.fetch(raw); return { member: m, user: m.user }; } catch {}
+  }
+  // username/tag
+  const found = guild.members.cache.find(m =>
+    (m.user.tag && m.user.tag.toLowerCase() === raw.toLowerCase()) ||
+    (m.user.username && m.user.username.toLowerCase() === raw.toLowerCase())
+  );
+  if (found) return { member: found, user: found.user };
+
+  return { member: null, user: null };
+}
+
+/* ======================= Embeds específicos ======================= */
+function buildBanEmbed({ targetTag, tiempo, motivo, autorizaTag, ticket }) {
+  const embed = pinkEmbedBase()
+    .setTitle('⛔ Ban aplicado')
+    .setDescription(
+      [
+        `**Usuario:** ${targetTag}`,
+        `**Tiempo:** ${tiempo}`,
+        `**Ticket:** ${ticket}`,
+        '',
+        `**Motivo:** ${motivo}`,
+        '',
+        `**Autoriza:** ${autorizaTag}`,
+      ].join('\n')
+    );
+  addPanelBranding(embed);
+  return embed;
+}
+
+function buildUnbanEmbed({ targetTag, motivo, autorizaTag, ticket }) {
+  const embed = pinkEmbedBase()
+    .setTitle('🍀 Unban aplicado')
+    .setDescription(
+      [
+        `**Usuario:** ${targetTag}`,
+        `**Ticket:** ${ticket}`,
+        '',
+        `**Motivo:** ${motivo}`,
+        '',
+        `**Autoriza:** ${autorizaTag}`,
+      ].join('\n')
+    );
+  addPanelBranding(embed);
+  return embed;
+}
+
+function buildExposeEmbed({ targetTag, tiempo, motivo, autorizaTag, link1, link2 }) {
+  const embed = pinkEmbedBase()
+    .setTitle('📢 Exposed')
+    .setDescription(
+      [
+        `**Usuario:** ${targetTag}`,
+        `**Tiempo de ban:** ${tiempo}`,
+        `**Motivo:** ${motivo}`,
+        `**Staff:** ${autorizaTag}`,
+      ].join('\n')
+    );
+
+  // Decide si usamos banner de marca o imagen de prueba
+  const isImg = /\.(png|jpe?g|gif|webp)$/i.test(link1);
+  if (isImg) {
+    // Si el link1 es imagen, lo mostramos como imagen grande
+    embed.setImage(link1);
+    addExposeBranding(embed, false); // no ponemos banner para no tapar la prueba
+  } else {
+    // Si no es imagen, dejamos banner y agregamos links clickeables
+    addExposeBranding(embed, true);
+  }
+
+  return embed;
+}
+
+/* ============================ Panel =============================== */
 async function sendControlPanel(channel) {
   const row1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('btn_ban').setLabel('Ban').setStyle(ButtonStyle.Danger),
@@ -107,420 +211,374 @@ async function sendControlPanel(channel) {
   );
 
   const embed = pinkEmbedBase()
-    .setTitle('PANEL DE BANEO')
+    .setTitle('**PANEL DE BANEO**')
     .setDescription(
-      `Este panel ha sido diseñado para centralizar y registrar todas las acciones importantes relacionadas con la moderación del servidor.
-
-**Funciones disponibles:**
-• **Ban:** Aplica un baneo con motivo, tiempo y autorización, dejando constancia en el registro oficial.
-• **Unban:** Retira un baneo con la misma transparencia, especificando motivo y autorización.
-• **Buscar:** Permite consultar el historial de baneos y exposiciones de un usuario.
-• **Expose:** Publica información y evidencia (imágenes o clips) sobre casos relevantes con fines informativos.
-
-> Todos los movimientos quedan guardados en el canal de logs para garantizar un seguimiento completo y seguro.`
+      [
+        'Este panel ha sido diseñado para centralizar y registrar todas las acciones importantes relacionadas con la moderación del servidor.',
+        '',
+        '**Funciones disponibles:**',
+        '• **Ban:** Aplica un baneo con motivo, tiempo y autorización, dejando constancia en el registro oficial.',
+        '• **Unban:** Retira un baneo con la misma transparencia, especificando motivo y autorización.',
+        '• **Buscar:** Permite consultar el historial de baneos y exposiciones de un usuario.',
+        '• **Expose:** Publica información y evidencia (imágenes o clips) sobre casos relevantes con fines informativos.',
+        '',
+        '> Todos los movimientos quedan guardados en el canal de logs para garantizar un seguimiento completo y seguro.'
+      ].join('\n')
     );
 
-  if (PANEL_LOGO_URL)   embed.setThumbnail(PANEL_LOGO_URL);
-  if (PANEL_BANNER_URL) embed.setImage(PANEL_BANNER_URL);
-
+  addPanelBranding(embed);
   await channel.send({ embeds: [embed], components: [row1] });
 }
 
-// ====== Modales ======
+/* ======================= Modales (UI) ========================= */
 function buildBanModal() {
-  const modal = new ModalBuilder().setCustomId('modal_ban').setTitle('Banear usuario');
-  const usuario = new TextInputBuilder().setCustomId('m_user').setLabel('Usuario (ID de Discord)').setStyle(TextInputStyle.Short).setRequired(true);
-  const motivo  = new TextInputBuilder().setCustomId('m_motivo').setLabel('Motivo de ban').setStyle(TextInputStyle.Paragraph).setRequired(true);
-  const tiempo  = new TextInputBuilder().setCustomId('m_tiempo').setLabel('Tiempo de ban (7d, 24h, permanente)').setStyle(TextInputStyle.Short).setRequired(true);
-  const ticket  = new TextInputBuilder().setCustomId('m_ticket').setLabel('Número de Ticket').setStyle(TextInputStyle.Short).setRequired(true);
-  const autor   = new TextInputBuilder().setCustomId('m_autoriza').setLabel('Usuario que autoriza (ID)').setStyle(TextInputStyle.Short).setRequired(true);
-  return modal.addComponents(
-    new ActionRowBuilder().addComponents(usuario),
-    new ActionRowBuilder().addComponents(motivo),
-    new ActionRowBuilder().addComponents(tiempo),
-    new ActionRowBuilder().addComponents(ticket),
-    new ActionRowBuilder().addComponents(autor),
-  );
+  return new ModalBuilder()
+    .setCustomId('modal_ban')
+    .setTitle('Aplicar BAN')
+    .addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('m_user').setLabel('Usuario (mención o ID)').setStyle(TextInputStyle.Short).setRequired(true)
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('m_motivo').setLabel('Motivo del ban').setStyle(TextInputStyle.Paragraph).setRequired(true)
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('m_tiempo').setLabel('Tiempo de ban (ej. 7 días / Permanente)').setStyle(TextInputStyle.Short).setRequired(true)
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('m_ticket').setLabel('Ticket / Caso').setStyle(TextInputStyle.Short).setRequired(true)
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('m_autoriza').setLabel('Usuario que autoriza (mención)').setStyle(TextInputStyle.Short).setRequired(true)
+      )
+    );
 }
 function buildUnbanModal() {
-  const modal = new ModalBuilder().setCustomId('modal_unban').setTitle('Desbanear usuario');
-  const usuario = new TextInputBuilder().setCustomId('m_user').setLabel('Usuario (ID de Discord)').setStyle(TextInputStyle.Short).setRequired(true);
-  const motivo  = new TextInputBuilder().setCustomId('m_motivo').setLabel('Motivo de unban').setStyle(TextInputStyle.Paragraph).setRequired(true);
-  const ticket  = new TextInputBuilder().setCustomId('m_ticket').setLabel('Número de Ticket').setStyle(TextInputStyle.Short).setRequired(true);
-  const autor   = new TextInputBuilder().setCustomId('m_autoriza').setLabel('Usuario que autoriza (ID)').setStyle(TextInputStyle.Short).setRequired(true);
-  return modal.addComponents(
-    new ActionRowBuilder().addComponents(usuario),
-    new ActionRowBuilder().addComponents(motivo),
-    new ActionRowBuilder().addComponents(ticket),
-    new ActionRowBuilder().addComponents(autor),
-  );
+  return new ModalBuilder()
+    .setCustomId('modal_unban')
+    .setTitle('Aplicar UNBAN')
+    .addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('m_user').setLabel('Usuario (mención o ID)').setStyle(TextInputStyle.Short).setRequired(true)
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('m_motivo').setLabel('Motivo de Unban').setStyle(TextInputStyle.Paragraph).setRequired(true)
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('m_ticket').setLabel('Ticket / Caso').setStyle(TextInputStyle.Short).setRequired(true)
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('m_autoriza').setLabel('Usuario que autoriza (mención)').setStyle(TextInputStyle.Short).setRequired(true)
+      )
+    );
 }
-function buildBuscarModal() {
-  const modal = new ModalBuilder().setCustomId('modal_buscar').setTitle('Buscar por usuario');
-  const usuario = new TextInputBuilder().setCustomId('m_user').setLabel('Usuario (ID de Discord / mención)').setStyle(TextInputStyle.Short).setRequired(true);
-  return modal.addComponents(new ActionRowBuilder().addComponents(usuario));
+function buildSearchModal() {
+  return new ModalBuilder()
+    .setCustomId('modal_search')
+    .setTitle('Buscar historial de usuario')
+    .addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('m_user').setLabel('Usuario (mención / ID / tag)').setStyle(TextInputStyle.Short).setRequired(true)
+      )
+    );
 }
 function buildExposeModal() {
-  const modal = new ModalBuilder().setCustomId('modal_expose').setTitle('Expose usuario');
-  const usuario = new TextInputBuilder().setCustomId('m_user').setLabel('Usuario (ID de Discord)').setStyle(TextInputStyle.Short).setRequired(true);
-  const motivo  = new TextInputBuilder().setCustomId('m_motivo').setLabel('Motivo de ban / Expose').setStyle(TextInputStyle.Paragraph).setRequired(true);
-  const tiempo  = new TextInputBuilder().setCustomId('m_tiempo').setLabel('Tiempo de ban (o "N/A")').setStyle(TextInputStyle.Short).setRequired(true);
-  const link1   = new TextInputBuilder().setCustomId('m_link1').setLabel('Pruebas (imagen/clip/link)').setStyle(TextInputStyle.Short).setRequired(true);
-  const link2   = new TextInputBuilder().setCustomId('m_link2').setLabel('Clip (opcional)').setStyle(TextInputStyle.Short).setRequired(false);
-  return modal.addComponents(
-    new ActionRowBuilder().addComponents(usuario),
-    new ActionRowBuilder().addComponents(motivo),
-    new ActionRowBuilder().addComponents(tiempo),
-    new ActionRowBuilder().addComponents(link1),
-    new ActionRowBuilder().addComponents(link2),
-  );
+  return new ModalBuilder()
+    .setCustomId('modal_expose')
+    .setTitle('Expose usuario')
+    .addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('m_user').setLabel('Usuario (mención o ID)').setStyle(TextInputStyle.Short).setRequired(true)
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('m_motivo').setLabel('Motivo de ban / Expose').setStyle(TextInputStyle.Paragraph).setRequired(true)
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('m_tiempo').setLabel('Tiempo de ban (o N/A)').setStyle(TextInputStyle.Short).setRequired(true)
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('m_link1').setLabel('Pruebas (Gif URL)').setStyle(TextInputStyle.Short).setRequired(true)
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('m_link2').setLabel('Clip (URL del clip en MP4)').setStyle(TextInputStyle.Short).setRequired(false)
+      )
+    );
 }
 
-// ====== Paginación de listas ======
-const PAGE_SIZE = 10;
-function buildPaginationRow(prefix, page, hasPrev, hasNext) {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`${prefix}_${Math.max(0, page - 1)}`).setLabel('◀️ Anterior').setStyle(ButtonStyle.Secondary).setDisabled(!hasPrev),
-    new ButtonBuilder().setCustomId(`${prefix}_${page + 1}`).setLabel('Siguiente ▶️').setStyle(ButtonStyle.Primary).setDisabled(!hasNext),
-  );
-}
-async function sendBansPage(interaction, page = 0, initial = false) {
-  const bans = loadJson(BANS_PATH);
-  const total = bans.length;
-  const start = page * PAGE_SIZE;
-  const end = Math.min(total, start + PAGE_SIZE);
-  const slice = bans.slice(start, end);
-
-  const lines = await Promise.all(slice.map(async (b, idx) => {
-    const tagUser = await resolveUserTag(interaction.client, b.userId);
-    const tagAut  = await resolveUserTag(interaction.client, b.autorizaId || b.byId);
-    return `**${start + idx + 1}.** [${b.type.toUpperCase()}] ${tagUser} | Ticket ${b.ticket || 'N/A'} | ${b.tiempo || 'N/A'} | ${new Date(b.createdAt).toLocaleString()}\nMotivo: ${b.motivo}\nAutoriza: ${tagAut}`;
-  }));
-
-  const embed = pinkEmbedBase().setTitle(`📄 Lista de Bans/Unbans (${total})`).setDescription(lines.join('\n\n') || 'Sin registros.');
-  const hasPrev = page > 0;
-  const hasNext = end < total;
-  const row = buildPaginationRow('page_bans', page, hasPrev, hasNext);
-
-  if (initial) await interaction.reply({ embeds: [embed], components: [row], ephemeral: false });
-  else await interaction.update({ embeds: [embed], components: [row] });
-}
-async function sendExposePage(interaction, page = 0, initial = false) {
-  const expos = loadJson(EXPOSED_PATH);
-  const total = expos.length;
-  const start = page * PAGE_SIZE;
-  const end = Math.min(total, start + PAGE_SIZE);
-  const slice = expos.slice(start, end);
-
-  const lines = await Promise.all(slice.map(async (e, idx) => {
-    const tagUser = await resolveUserTag(interaction.client, e.userId);
-    const tagBy   = await resolveUserTag(interaction.client, e.byId);
-    const links   = [e.link1, e.link2].filter(Boolean).join(' | ');
-    return `**${start + idx + 1}.** ${tagUser} | ${new Date(e.createdAt).toLocaleString()}\nMotivo: ${e.motivo}\nTiempo: ${e.tiempo}\nLinks: ${links || 'N/A'}\nAutoriza: ${tagBy}`;
-  }));
-
-  const embed = pinkEmbedBase().setTitle(`📄 Lista de Exposed (${total})`).setDescription(lines.join('\n\n') || 'Sin registros.');
-  const hasPrev = page > 0;
-  const hasNext = end < total;
-  const row = buildPaginationRow('page_expose', page, hasPrev, hasNext);
-
-  if (initial) await interaction.reply({ embeds: [embed], components: [row], ephemeral: false });
-  else await interaction.update({ embeds: [embed], components: [row] });
-}
-
-// ===== Logs =====
-async function sendLog(interaction, action, data) {
+/* ===================== Panel por mensaje ===================== */
+client.on(Events.MessageCreate, async (message) => {
   try {
-    const logCh = interaction.guild.channels.cache.get(LOGS_CHANNEL_ID);
-    if (!logCh) return;
-    const fields = Object.entries(data).slice(0, 25).map(([k, v]) => ({
-      name: k,
-      value: typeof v === 'string' ? (v || 'N/A') : '```json\n' + JSON.stringify(v, null, 2).slice(0, 950) + '\n```',
-      inline: false
-    }));
-    const embed = pinkEmbedBase()
-      .setTitle(`🗂️ Log: ${action}`)
-      .addFields(
-        { name: 'Ejecutado por', value: `<@${interaction.user.id}>`, inline: true },
-        { name: 'En', value: `<#${interaction.channelId}>`, inline: true },
-        { name: 'Fecha', value: new Date().toLocaleString(), inline: true },
-        ...fields
-      );
-    await logCh.send({ embeds: [embed] });
-  } catch (e) {
-    console.warn('No se pudo enviar log:', e?.message);
-  }
-}
+    if (!message.guild || message.author.bot) return;
 
-// ===== Listener principal =====
+    if (message.content.trim().toLowerCase() === '!panel-ban') {
+      if (!ACTIONS_CHANNEL_ID || message.channel.id !== ACTIONS_CHANNEL_ID) {
+        return message.reply({ content: no('Este comando solo puede usarse en el canal configurado de acciones.'), allowedMentions: { repliedUser: false } });
+      }
+      await sendControlPanel(message.channel);
+      await message.react('🩷');
+    }
+  } catch (e) {
+    console.error('Error en MessageCreate:', e);
+  }
+});
+
+/* ================== Interactions: botones/modales/slash ================== */
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
-    // --- Botones ---
+    /* ---------- Botones ---------- */
     if (interaction.isButton()) {
-      if (interaction.customId === 'btn_ban') {
-        if (!hasRole(interaction.member, BAN_UNBAN_ROLE_ID)) return interaction.reply({ content: 'No tienes permiso para usar este botón.', ephemeral: true });
-        return interaction.showModal(buildBanModal());
-      }
-      if (interaction.customId === 'btn_unban') {
-        if (!hasRole(interaction.member, BAN_UNBAN_ROLE_ID)) return interaction.reply({ content: 'No tienes permiso para usar este botón.', ephemeral: true });
-        return interaction.showModal(buildUnbanModal());
-      }
-      if (interaction.customId === 'btn_buscar') {
-        return interaction.showModal(buildBuscarModal());
-      }
-      if (interaction.customId === 'btn_expose') {
-        return interaction.showModal(buildExposeModal());
-      }
-      if (interaction.customId.startsWith('page_bans_')) {
-        const page = parseInt(interaction.customId.split('_').pop(), 10) || 0;
-        return sendBansPage(interaction, page);
-      }
-      if (interaction.customId.startsWith('page_expose_')) {
-        const page = parseInt(interaction.customId.split('_').pop(), 10) || 0;
-        return sendExposePage(interaction, page);
+      if (!interaction.guild) return;
+
+      switch (interaction.customId) {
+        case 'btn_ban':
+          if (!hasAnyRole(interaction.member, BAN_UNBAN_ROLE_ID) && !interaction.member.permissions.has('Administrator')) {
+            return interaction.reply({ content: no('No tienes permiso para Ban.'), ephemeral: true });
+          }
+          await interaction.showModal(buildBanModal());
+          return;
+
+        case 'btn_unban':
+          if (!hasAnyRole(interaction.member, BAN_UNBAN_ROLE_ID) && !interaction.member.permissions.has('Administrator')) {
+            return interaction.reply({ content: no('No tienes permiso para Unban.'), ephemeral: true });
+          }
+          await interaction.showModal(buildUnbanModal());
+          return;
+
+        case 'btn_buscar':
+          await interaction.showModal(buildSearchModal());
+          return;
+
+        case 'btn_expose':
+          await interaction.showModal(buildExposeModal());
+          return;
       }
     }
 
-    // --- Modales ---
+    /* ---------- Modales ---------- */
     if (interaction.isModalSubmit()) {
-      // BAN
+      // ===== BAN =====
       if (interaction.customId === 'modal_ban') {
-        if (!hasRole(interaction.member, BAN_UNBAN_ROLE_ID)) return interaction.reply({ content: 'No tienes permiso para realizar Bans.', ephemeral: true });
-        const userId     = interaction.fields.getTextInputValue('m_user').trim();
-        const motivo     = interaction.fields.getTextInputValue('m_motivo').trim();
-        const tiempo     = interaction.fields.getTextInputValue('m_tiempo').trim();
-        const ticket     = interaction.fields.getTextInputValue('m_ticket').trim();
-        const autorizaId = interaction.fields.getTextInputValue('m_autoriza').trim();
+        const rawUser = interaction.fields.getTextInputValue('m_user');
+        const motivo  = interaction.fields.getTextInputValue('m_motivo');
+        const tiempo  = interaction.fields.getTextInputValue('m_tiempo');
+        const ticket  = interaction.fields.getTextInputValue('m_ticket');
+        const autor   = interaction.fields.getTextInputValue('m_autoriza');
 
-        const bans = loadJson(BANS_PATH);
-        const banRec = {
-          type: 'ban',
-          userId, motivo, tiempo, ticket, autorizaId,
-          byId: interaction.user.id, guildId: interaction.guildId,
-          createdAt: Date.now(), messageId: null, channelId: null,
-        };
-        bans.unshift(banRec);
-        saveJson(BANS_PATH, bans);
+        const { member: targetMember, user: targetUser } = await resolveUser(interaction.guild, rawUser);
+        if (!targetUser) return interaction.reply({ content: no('No pude resolver el usuario.'), ephemeral: true });
 
-        if (APPLY_REAL_BANS) {
-          try {
-            const member = await interaction.guild.members.fetch(userId);
-            await member.ban({ reason: `[Ticket ${ticket}] ${motivo}` });
-          } catch (e) { console.warn('No se pudo banear realmente:', e?.message); }
+        const autoriza = await resolveUser(interaction.guild, autor);
+        const autorizaTag = autoriza.user ? tagOf(autoriza.user) : autor;
+        const targetTag   = tagOf(targetUser);
+
+        if (APPLY_REAL_BANS && targetMember) {
+          try { await targetMember.ban({ reason: `[${ticket}] ${motivo}` }); } catch {}
         }
 
-        const actionsChannel = interaction.guild.channels.cache.get(ACTIONS_CHANNEL_ID);
-        const tagUser = await resolveUserTag(interaction.client, userId);
-        const tagAutoriza = await resolveUserTag(interaction.client, autorizaId);
-        const actionEmbed = pinkEmbedBase()
-          .setTitle('🚫 Ban aplicado')
-          .addFields(
-            { name: 'Usuario', value: `<@${userId}> (${tagUser})`, inline: true },
-            { name: 'Tiempo', value: tiempo, inline: true },
-            { name: 'Ticket', value: ticket, inline: true },
-            { name: 'Motivo', value: motivo, inline: false },
-            { name: 'Autoriza', value: `<@${autorizaId}> (${tagAutoriza})`, inline: false },
-          );
+        const actionsCh = interaction.guild.channels.cache.get(ACTIONS_CHANNEL_ID);
+        if (!actionsCh) return interaction.reply({ content: no('Canal de acciones no configurado.'), ephemeral: true });
 
-        if (actionsChannel) {
-          const sent = await actionsChannel.send({ embeds: [actionEmbed] });
-          const updated = loadJson(BANS_PATH);
-          updated[0].messageId = sent.id;
-          updated[0].channelId = actionsChannel.id;
-          saveJson(BANS_PATH, updated);
-        }
+        const embed = buildBanEmbed({ targetTag, tiempo, motivo, autorizaTag, ticket });
+        const sent = await actionsCh.send({ embeds: [embed] });
 
-        await sendLog(interaction, 'BAN', { userId, motivo, tiempo, ticket, autorizaId });
-        return interaction.reply({ content: '✅ Ban registrado.', ephemeral: true });
+        const bans = readJSON(BANS_PATH);
+        bans.push({
+          userId: targetUser.id,
+          userTag: targetUser.tag,
+          tiempo, motivo, ticket,
+          autoriza: autorizaTag,
+          messageId: sent.id,
+          channelId: actionsCh.id,
+          createdAt: Date.now()
+        });
+        writeJSON(BANS_PATH, bans);
+
+        await sendLog(interaction, 'BAN', { usuario: targetTag, tiempo, motivo, ticket, autoriza: autorizaTag, msg: sent.url });
+        return interaction.reply({ content: ok('Ban publicado.'), ephemeral: true });
       }
 
-      // UNBAN
+      // ===== UNBAN =====
       if (interaction.customId === 'modal_unban') {
-        if (!hasRole(interaction.member, BAN_UNBAN_ROLE_ID)) return interaction.reply({ content: 'No tienes permiso para realizar Unban.', ephemeral: true });
-        const userId     = interaction.fields.getTextInputValue('m_user').trim();
-        const motivo     = interaction.fields.getTextInputValue('m_motivo').trim();
-        const ticket     = interaction.fields.getTextInputValue('m_ticket').trim();
-        const autorizaId = interaction.fields.getTextInputValue('m_autoriza').trim();
+        const rawUser = interaction.fields.getTextInputValue('m_user');
+        const motivo  = interaction.fields.getTextInputValue('m_motivo');
+        const ticket  = interaction.fields.getTextInputValue('m_ticket');
+        const autor   = interaction.fields.getTextInputValue('m_autoriza');
 
-        const bans = loadJson(BANS_PATH);
+        const { user: targetUser } = await resolveUser(interaction.guild, rawUser);
+        if (!targetUser) return interaction.reply({ content: no('No pude resolver el usuario.'), ephemeral: true });
 
-        let banToDelete = null;
-        if (ticket) banToDelete = bans.find(b => b.type === 'ban' && b.ticket === ticket);
-        if (!banToDelete) banToDelete = bans.find(b => b.type === 'ban' && b.userId === userId);
+        const autoriza = await resolveUser(interaction.guild, autor);
+        const autorizaTag = autoriza.user ? tagOf(autoriza.user) : autor;
+        const targetTag   = tagOf(targetUser);
 
         if (APPLY_REAL_BANS) {
-          try { await interaction.guild.bans.remove(userId, `[Ticket ${ticket}] ${motivo}`); }
-          catch (e) { console.warn('No se pudo desbanear realmente:', e?.message); }
+          try { await interaction.guild.members.unban(targetUser.id, `[${ticket}] ${motivo}`); } catch {}
         }
 
-        bans.unshift({
-          type: 'unban', userId, motivo, tiempo: 'N/A', ticket, autorizaId,
-          byId: interaction.user.id, guildId: interaction.guildId, createdAt: Date.now()
-        });
-        saveJson(BANS_PATH, bans);
-
-        // Borrar mensaje de BAN + logs
-        if (banToDelete?.messageId && banToDelete?.channelId) {
+        // Borrar mensaje del ban (si existe en registros)
+        const bans = readJSON(BANS_PATH);
+        const lastBan = [...bans].reverse().find(b => b.userId === targetUser.id);
+        if (lastBan?.messageId && lastBan?.channelId) {
           try {
-            const ch = interaction.guild.channels.cache.get(banToDelete.channelId);
-            const msgLink = `https://discord.com/channels/${interaction.guildId}/${banToDelete.channelId}/${banToDelete.messageId}`;
-            let deleted = false;
+            const ch = interaction.guild.channels.cache.get(lastBan.channelId);
             if (ch) {
-              const msg = await ch.messages.fetch(banToDelete.messageId).catch(() => null);
-              if (msg) { await msg.delete(); deleted = true; }
-            }
-            if (deleted) {
-              await sendLog(interaction, 'BAN_MESSAGE_DELETED', {
-                userId, ticket, channel: `<#${banToDelete.channelId}>`,
-                messageId: banToDelete.messageId, ban_message_link: msgLink
-              });
-            } else {
-              await sendLog(interaction, 'BAN_MESSAGE_NOT_FOUND', {
-                userId, ticket, channelId: banToDelete.channelId, messageId: banToDelete.messageId
+              const msg = await ch.messages.fetch(lastBan.messageId).catch(() => null);
+              if (msg) await msg.delete();
+              await sendLog(interaction, 'BAN_ELIMINADO', {
+                usuario: targetTag, ticket: lastBan.ticket || ticket,
+                referencia: `${lastBan.channelId}/${lastBan.messageId}`
               });
             }
           } catch (e) {
-            await sendLog(interaction, 'BAN_MESSAGE_DELETE_ERROR', {
-              userId, ticket, error: (e?.message || String(e)).slice(0, 180)
-            });
+            console.warn('No se pudo borrar el mensaje de BAN:', e.message);
           }
         }
 
-        await sendLog(interaction, 'UNBAN', { userId, motivo, ticket, autorizaId });
-        return interaction.reply({ content: '✅ Unban registrado y mensaje de ban eliminado (si existía).', ephemeral: true });
+        // Notificar unban SOLO a logs
+        const embed = buildUnbanEmbed({ targetTag, motivo, autorizaTag, ticket });
+        const logsCh = interaction.guild.channels.cache.get(LOGS_CHANNEL_ID);
+        if (logsCh) await logsCh.send({ embeds: [embed] });
+
+        await sendLog(interaction, 'UNBAN', { usuario: targetTag, motivo, ticket, autoriza: autorizaTag });
+        return interaction.reply({ content: ok('Unban registrado y ban previo eliminado (si existía).'), ephemeral: true });
       }
 
-      // BUSCAR
-      if (interaction.customId === 'modal_buscar') {
-        let input = interaction.fields.getTextInputValue('m_user').trim();
-        let userId = input;
-        const mention = input.match(/^<@!?(\d+)>$/);
-        if (mention) userId = mention[1];
+      // ===== BUSCAR =====
+      if (interaction.customId === 'modal_search') {
+        const rawUser = interaction.fields.getTextInputValue('m_user');
+        const { user: targetUser } = await resolveUser(interaction.guild, rawUser);
+        const userId = targetUser?.id || rawUser;
 
-        const bans = loadJson(BANS_PATH).filter(x => x.userId === userId);
-        const expos = loadJson(EXPOSED_PATH).filter(x => x.userId === userId);
-        const tagUser = await resolveUserTag(interaction.client, userId);
+        const bans = readJSON(BANS_PATH).filter(b => b.userId === userId || b.userTag?.toLowerCase() === rawUser.toLowerCase());
+        const exps = readJSON(EXPOSED_PATH).filter(e => e.userId === userId || e.userTag?.toLowerCase() === rawUser.toLowerCase());
 
-        const embed = pinkEmbedBase().setTitle(`🔎 Búsqueda: ${tagUser}`);
-        if (bans.length === 0 && expos.length === 0) {
-          embed.setDescription('Sin registros.');
-        } else {
-          if (bans.length) {
-            embed.addFields({ name: `Bans/Unbans (${bans.length})`, value: bans.slice(0, 10).map(b =>
-              `• **${b.type.toUpperCase()}** | Ticket ${b.ticket} | ${new Date(b.createdAt).toLocaleString()} | Motivo: ${b.motivo}`
-            ).join('\n').slice(0, 1024) });
-          }
-          if (expos.length) {
-            embed.addFields({ name: `Exposed (${expos.length})`, value: expos.slice(0, 10).map(e =>
-              `• ${new Date(e.createdAt).toLocaleString()} | Motivo: ${e.motivo} | Tiempo: ${e.tiempo}`
-            ).join('\n').slice(0, 1024) });
-          }
-        }
+        const embed = pinkEmbedBase()
+          .setTitle(`🔎 Historial de ${targetUser ? targetUser.tag : rawUser}`)
+          .setDescription(
+            [
+              `**Bans:** ${bans.length}`,
+              `**Exposed:** ${exps.length}`,
+              '',
+              '**Últimos movimientos:**',
+              ...bans.slice(-3).map(b => `• Ban: ${b.motivo} (${b.tiempo}) [${b.ticket}]`),
+              ...exps.slice(-3).map(e => `• Expose: ${e.motivo} (${e.tiempo})`)
+            ].join('\n') || '_Sin registros_'
+          );
+
+        addPanelBranding(embed);
         return interaction.reply({ embeds: [embed], ephemeral: true });
       }
 
-      // EXPOSE (menciones, logo/banner, Pruebas/Clip y @everyone)
+      // ===== EXPOSE =====
       if (interaction.customId === 'modal_expose') {
-        const userId = interaction.fields.getTextInputValue('m_user').trim();
-        const motivo = interaction.fields.getTextInputValue('m_motivo').trim();
-        const tiempo = interaction.fields.getTextInputValue('m_tiempo').trim();
-        const link1  = interaction.fields.getTextInputValue('m_link1').trim();
-        const link2  = interaction.fields.getTextInputValue('m_link2').trim();
+        const rawUser = interaction.fields.getTextInputValue('m_user');
+        const motivo  = interaction.fields.getTextInputValue('m_motivo');
+        const tiempo  = interaction.fields.getTextInputValue('m_tiempo');
+        const link1   = interaction.fields.getTextInputValue('m_link1');
+        const link2   = interaction.fields.getTextInputValue('m_link2') || '';
 
-        const exposed = loadJson(EXPOSED_PATH);
-        exposed.unshift({ userId, motivo, tiempo, link1, link2: link2 || null, byId: interaction.user.id, guildId: interaction.guildId, createdAt: Date.now() });
-        saveJson(EXPOSED_PATH, exposed);
+        const { user: targetUser } = await resolveUser(interaction.guild, rawUser);
+        if (!targetUser) return interaction.reply({ content: no('No pude resolver el usuario.'), ephemeral: true });
 
-        const exposeChannel = interaction.guild.channels.cache.get(EXPOSE_CHANNEL_ID);
+        const autorizaTag = tagOf(interaction.user);
+        const targetTag   = tagOf(targetUser);
 
-        const embed = pinkEmbedBase()
-          .setTitle('📢 Expose')
-          .setDescription(
-            `**Usuario:** <@${userId}>\n` +
-            `**Tiempo de ban:** ${tiempo}\n` +
-            `**Motivo:** ${motivo}\n` +
-            `**Autoriza:** <@${interaction.user.id}>`
-          );
+        const embed = buildExposeEmbed({ targetTag, tiempo, motivo, autorizaTag, link1, link2 });
 
-        if (EXPOSE_LOGO_URL) {
-          embed.setThumbnail(EXPOSE_LOGO_URL);
-          embed.setFooter({ text: 'Registro Expose', iconURL: EXPOSE_LOGO_URL });
+        // Campos de “Pruebas” y “Clip”
+        const isImg1 = /\.(png|jpe?g|gif|webp)$/i.test(link1);
+        const isVid1 = /\.(mp4|mov|webm)$/i.test(link1);
+        if (!isImg1) {
+          // si no es imagen (video u otro), lo dejamos como link
+          embed.addFields({ name: 'Pruebas', value: `[Abrir](${link1})`, inline: true });
         }
 
-        const looksImg = /\.(png|jpe?g|gif|webp)(\?.*)?$/i;
-        const looksVid = /\.(mp4|mov|webm)(\?.*)?$/i;
-
-        const files = [];
-        if (EXPOSE_BANNER_URL) embed.setImage(EXPOSE_BANNER_URL);
-
-        // ---- link1 = PRUEBAS ----
-        if (looksImg.test(link1)) {
-          embed.setImage(link1);
-        } else if (looksVid.test(link1)) {
-          files.push({ attachment: link1, name: 'pruebas.mp4' });
-        } else if (link1) {
-          embed.addFields({ name: 'Pruebas', value: `[Abrir](${link1})`, inline: false });
-        }
-
-        // ---- link2 = CLIP ----
         if (link2) {
-          if (looksImg.test(link2)) {
-            // Si quieres mantener SIEMPRE el logo, comenta la siguiente línea
-            embed.setThumbnail(link2);
-          } else if (looksVid.test(link2)) {
-            files.push({ attachment: link2, name: 'clip.mp4' });
-          } else {
-            embed.addFields({ name: 'Clip', value: `[Abrir](${link2})`, inline: true });
-          }
+          const isVid2 = /\.(mp4|mov|webm)$/i.test(link2);
+          const isImg2 = /\.(png|jpe?g|gif|webp)$/i.test(link2);
+          if (isImg2 || isVid2) embed.addFields({ name: 'Clip', value: `[Abrir](${link2})`, inline: true });
+          else embed.addFields({ name: 'Clip', value: `[Abrir](${link2})`, inline: true });
         }
 
-        if (exposeChannel) {
-          await exposeChannel.send({
-            content: '@everyone', // notifica a todos
-            embeds: [embed],
-            files,
-            allowedMentions: { parse: ['users','roles','everyone'] } // asegura el ping global
-          });
-        }
+        const exposeCh = interaction.guild.channels.cache.get(EXPOSE_CHANNEL_ID);
+        if (!exposeCh) return interaction.reply({ content: no('Canal de expose no configurado.'), ephemeral: true });
 
-        await sendLog(interaction, 'EXPOSE', { userId, motivo, tiempo, link1, link2 });
-        return interaction.reply({ content: '✅ Expose publicado.', ephemeral: true });
+        const content = '@everyone';
+        const sent = await exposeCh.send({
+          content,
+          embeds: [embed],
+          allowedMentions: { parse: ['everyone', 'users', 'roles'] }
+        });
+
+        const exps = readJSON(EXPOSED_PATH);
+        exps.push({
+          userId: targetUser.id,
+          userTag: targetUser.tag,
+          motivo, tiempo,
+          link1, link2,
+          messageId: sent.id,
+          channelId: exposeCh.id,
+          autoriza: autorizaTag,
+          createdAt: Date.now()
+        });
+        writeJSON(EXPOSED_PATH, exps);
+
+        await sendLog(interaction, 'EXPOSE', { usuario: targetTag, motivo, tiempo, link1, link2, msg: sent.url });
+        return interaction.reply({ content: ok('Expose publicado.'), ephemeral: true });
       }
     }
 
-    // --- Comandos ---
+    /* ---------- Slash Commands ---------- */
     if (interaction.isChatInputCommand()) {
-      if (interaction.commandName === 'lista-ban') {
-        if (!hasAnyRole(interaction.member, LISTS_ROLES)) {
-          return interaction.reply({ content: 'No tienes permiso para usar este comando.', ephemeral: true });
+      const name = interaction.commandName;
+
+      if (name === 'lista-ban') {
+        if (!hasAnyRole(interaction.member, LISTS_ROLES) && !interaction.member.permissions.has('Administrator')) {
+          return interaction.reply({ content: no('No tienes permiso para usar este comando.'), ephemeral: true });
         }
-        return sendBansPage(interaction, 0, true);
-      }
-      if (interaction.commandName === 'lista-exposed') {
-        if (!hasAnyRole(interaction.member, LISTS_ROLES)) {
-          return interaction.reply({ content: 'No tienes permiso para usar este comando.', ephemeral: true });
-        }
-        return sendExposePage(interaction, 0, true);
+        const bans = readJSON(BANS_PATH);
+        const embed = pinkEmbedBase().setTitle(`📄 Lista de bans (${bans.length})`);
+        addPanelBranding(embed);
+        const lines = bans.slice(-20).reverse().map(b =>
+          `• ${b.userTag || b.userId} — **${b.tiempo}** — ${b.motivo} [${b.ticket || 's/ticket'}]`
+        );
+        embed.setDescription(lines.join('\n') || '_Sin registros_');
+        return interaction.reply({ embeds: [embed] });
       }
 
-      // ===== NUEVO: /export-registros =====
-      if (interaction.commandName === 'export-registros') {
-        if (!hasAnyRole(interaction.member, LISTS_ROLES)) {
-          return interaction.reply({ content: 'No tienes permiso para exportar registros.', ephemeral: true });
+      if (name === 'lista-exposed') {
+        if (!hasAnyRole(interaction.member, LISTS_ROLES) && !interaction.member.permissions.has('Administrator')) {
+          return interaction.reply({ content: no('No tienes permiso para usar este comando.'), ephemeral: true });
         }
-        const bans = loadJson(BANS_PATH);
-        const expos = loadJson(EXPOSED_PATH);
-        const bansCsv  = buildBansCSV(bans);
-        const exposCsv = buildExposedCSV(expos);
-        await interaction.reply({
-          content: '📦 Exportaciones listas:',
-          files: [
-            { attachment: Buffer.from(bansCsv, 'utf8'),  name: `bans_${Date.now()}.csv` },
-            { attachment: Buffer.from(exposCsv, 'utf8'), name: `exposed_${Date.now()}.csv` }
-          ],
-          ephemeral: false
-        });
-        return;
+        const exps = readJSON(EXPOSED_PATH);
+        const embed = pinkEmbedBase().setTitle(`📄 Lista de exposed (${exps.length})`);
+        addExposeBranding(embed);
+        const lines = exps.slice(-20).reverse().map(e =>
+          `• ${e.userTag || e.userId} — ${e.motivo} (${e.tiempo})`
+        );
+        embed.setDescription(lines.join('\n') || '_Sin registros_');
+        return interaction.reply({ embeds: [embed] });
+      }
+
+      if (name === 'export-registros') {
+        if (!hasAnyRole(interaction.member, LISTS_ROLES) && !interaction.member.permissions.has('Administrator')) {
+          return interaction.reply({ content: no('No tienes permiso para usar este comando.'), ephemeral: true });
+        }
+
+        const bans = readJSON(BANS_PATH);
+        const exps = readJSON(EXPOSED_PATH);
+
+        const esc = (s) => String(s ?? '').replaceAll('"','""');
+        const bansCsv =
+          'type,userId,userTag,tiempo,motivo,ticket,autoriza,createdAt\n' +
+          bans.map(b => `ban,"${esc(b.userId)}","${esc(b.userTag)}","${esc(b.tiempo)}","${esc(b.motivo)}","${esc(b.ticket)}","${esc(b.autoriza)}","${b.createdAt}"`).join('\n');
+        const expsCsv =
+          'type,userId,userTag,tiempo,motivo,link1,link2,autoriza,createdAt\n' +
+          exps.map(e => `expose,"${esc(e.userId)}","${esc(e.userTag)}","${esc(e.tiempo)}","${esc(e.motivo)}","${esc(e.link1)}","${esc(e.link2)}","${esc(e.autoriza)}","${e.createdAt}"`).join('\n');
+
+        const allCsv = bansCsv + '\n' + expsCsv + '\n';
+        const fileName = `registros_${Date.now()}.csv`;
+        return interaction.reply({ files: [{ attachment: Buffer.from(allCsv, 'utf8'), name: fileName }] });
       }
     }
   } catch (err) {
@@ -533,14 +591,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
-// ===== Enviar panel con !panel-ban =====
-client.on(Events.MessageCreate, async (msg) => {
-  if (!msg.guild || msg.author.bot) return;
-  if (!msg.content.startsWith('!panel-ban')) return;
-  if (!hasRole(msg.member, BAN_UNBAN_ROLE_ID)) {
-    return msg.reply('No tienes permiso para colocar el panel.');
-  }
-  await sendControlPanel(msg.channel);
+/* ======================== Ready & login ======================== */
+client.once(Events.ClientReady, (c) => {
+  console.log(ok(`Conectado como ${c.user.tag}`));
 });
 
 client.login(DISCORD_TOKEN);
